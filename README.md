@@ -1,90 +1,113 @@
-# YouTube Downloader (Node.js)
+# YouTube Downloader
 
-Un script Node.js pour télécharger des vidéos et de l'audio depuis YouTube.
+A standalone Node.js script to download videos and audio from YouTube using `yt-dlp`.
 
-## Caractéristiques
+## Features
 
-- ✅ **Installation automatique** - yt-dlp est téléchargé automatiquement au premier lancement
-- ✅ **Support des playlists** - Télécharge automatiquement toutes les vidéos d'une playlist
-- ✅ Téléchargement audio (MP3) avec choix de qualité
-- ✅ Téléchargement vidéo (MP4) avec choix de qualité
-- ✅ Affichage de la progression en temps réel
-- ✅ ffmpeg inclus (pas d'installation manuelle)
+- ✅ **Automatic Installation** - `yt-dlp` is automatically downloaded on the first run.
+- ✅ **Playlist Support** - Automatically detects and downloads entire playlists.
+- ✅ **Audio Download** - MP3 format with customizable quality (128, 192, 256, 320 kbps).
+- ✅ **Video Download** - MP4 format with quality selection (720p, 1080p, or best available).
+- ✅ **Real-time Progress** - Displays download percentage, speed, and ETA.
+- ✅ **Built-in ffmpeg** - Uses `ffmpeg-static`, no manual installation required.
+- ✅ **Interactive & CLI Modes** - Use it interactively or via command-line arguments.
 
-## Prérequis
+## Prerequisites
 
-- **Node.js** >= 18.0.0
+- **Node.js** >= 24.0.0
 
-C'est tout ! Le binaire yt-dlp est téléchargé automatiquement au premier lancement.
+The `yt-dlp` binary is managed automatically by the script.
 
 ## Installation
 
 ```bash
-cd yt-downloader
+git clone <repository-url>
+cd youtube-download
 npm install
 ```
 
-## Utilisation
+## Configuration
 
-### Télécharger une vidéo
+The script uses a `.env` file for configuration. Ensure it exists in the root directory:
+
+```env
+LINKS_FILE=links.txt
+DOWNLOADS_DIR=downloads
+YTDLP_PATH=./bin/yt-dlp
+```
+
+> **Note:** The `YTDLP_PATH` is where the binary will be downloaded if not present.
+
+## Usage
+
+### 1. Interactive Mode
+
+Simply run the script. If no URL is provided as an argument, it will check your `links.txt` file or prompt for input.
 
 ```bash
-node index.js "https://www.youtube.com/watch?v=VIDEO_ID"
+npm start
 ```
 
-### Télécharger une playlist complète
+### 2. Quick Commands
+
+You can use predefined npm scripts to skip some prompts:
 
 ```bash
-node index.js "https://www.youtube.com/playlist?list=PLAYLIST_ID"
+# Download as audio (320kbps)
+npm run audio -- "https://www.youtube.com/watch?v=VIDEO_ID"
+
+# Download as video (Best quality)
+npm run video -- "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
-### Utiliser un fichier de liens
+### 3. Using a Links File
 
-Créez un fichier `links.txt` avec une URL par ligne :
+Create a `links.txt` file (configured in `.env`) with one URL per line:
 
-```
+```text
 https://www.youtube.com/watch?v=VIDEO_ID_1
 https://www.youtube.com/watch?v=VIDEO_ID_2
-# Ceci est un commentaire (lignes commençant par # sont ignorées)
+# Lines starting with # are ignored
 https://www.youtube.com/playlist?list=PLAYLIST_ID
 ```
 
-Puis lancez :
+Then run:
 
 ```bash
-node index.js
+npm start
 ```
 
-## Options interactives
+## Options
 
-Le script vous demandera :
+When running interactively, the script will ask for:
 
-1. **Type de média** : Audio (0) ou Vidéo (1)
-2. **Qualité** :
-   - Audio : 128, 192, 256, 320 kbps
-   - Vidéo : 720p, 1080p, ou meilleure qualité disponible
-3. **Dossier de destination** : Par défaut `./downloads` (ou `./downloads/{nom_playlist}` pour les playlists)
+1. **Media Type**: Audio (0) or Video (1).
+2. **Quality**: 
+   - Audio: 128, 192, 256, or 320 kbps.
+   - Video: 720, 1080, or "best".
+3. **Destination**: Defaults to `./downloads` or a subfolder for playlists.
 
-## Structure des fichiers
+## File Structure
 
 ```
-yt-downloader/
-├── index.js        # Script principal
-├── package.json    # Configuration npm
-├── bin/            # Binaire yt-dlp (téléchargé automatiquement)
-├── links.txt       # (optionnel) Liste de liens YouTube
-├── downloads/      # Dossier de téléchargement par défaut
-└── README.md       # Ce fichier
+youtube-download/
+├── index.js        # Main script
+├── package.json    # Project configuration
+├── .env            # Environment variables
+├── links.txt       # (Optional) List of YouTube URLs
+├── bin/            # Location of yt-dlp binary
+└── downloads/      # Default download directory
 ```
 
-## Dépendances
+## Dependencies
 
 | Package | Description |
 |---------|-------------|
-| `yt-dlp-wrap` | Wrapper Node.js pour yt-dlp avec téléchargement auto |
-| `ffmpeg-static` | Binaire ffmpeg inclus automatiquement |
-| `fluent-ffmpeg` | API fluide pour ffmpeg |
+| `yt-dlp-wrap` | Node.js wrapper for yt-dlp |
+| `ffmpeg-static` | Static ffmpeg binaries |
+| `fluent-ffmpeg` | ffmpeg command wrapper |
+| `dotenv` | Environment variable loader |
 
-## Licence
+## License
 
 MIT

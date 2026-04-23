@@ -4,28 +4,61 @@ import * as fs from "fs";
 import * as path from "path";
 import * as readline from "readline";
 import { fileURLToPath } from "url";
+import * as dotenv from "dotenv";
+import os from "os";
+import https from "https";
+
+dotenv.config({quiet: true});
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // === CONFIGURATION ===
-const LINKS_FILE = "links.txt";
-const DOWNLOADS_DIR = "C:\\Music";
-const YTDLP_PATH = path.join(__dirname, "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+const LINKS_FILE = process.env.LINKS_FILE;
+const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR;
+const YTDLP_PATH = process.env.YTDLP_PATH;
 
-// === DEFAULT OPTIONS (used with -y flag) ===
-const DEFAULTS = {
-  mediaType: "audio",
-  quality: "320",
-};
+/**
+ * Downloads a file from a URL to a destination path
+ */
+function downloadFile(url, dest) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(dest);
+    https.get(url, (response) => {
+      if (response.statusCode === 302 || response.statusCode === 301) {
+        downloadFile(response.headers.location, dest).then(resolve).catch(reject);
+        return;
+      }
+      if (response.statusCode !== 200) {
+        reject(new Error(`Failed to download: ${response.statusCode}`));
+        return;
+      }
+      response.pipe(file);
+      file.on("finish", () => {
+        file.close();
+        fs.chmodSync(dest, 0o755);
+        resolve();
+      });
+    }).on("error", (err) => {
+      fs.unlink(dest, () => {});
+      reject(err);
+    });
+  });
+}
 
 /**
  * Downloads yt-dlp binary if not present
  */
 async function ensureYtDlp() {
   if (fs.existsSync(YTDLP_PATH)) {
-    console.log("✅ yt-dlp binary found.");
-    return;
+    // Check if it's a directory (might happen if something went wrong)
+    if (fs.lstatSync(YTDLP_PATH).isDirectory()) {
+      console.log("⚠️ Found a directory at YTDLP_PATH. Removing it...");
+      fs.rmSync(YTDLP_PATH, { recursive: true, force: true });
+    } else {
+      console.log("✅ yt-dlp binary found.");
+      return;
+    }
   }
 
   console.log("📥 Downloading yt-dlp binary (first run only)...");
@@ -37,10 +70,30 @@ async function ensureYtDlp() {
   }
 
   try {
-    // Get latest release URL
-    const releaseUrl = await YTDlpWrap.default.getGithubReleases(1, 1);
-    await YTDlpWrap.default.downloadFromGithub(YTDLP_PATH);
-    console.log("✅ yt-dlp downloaded successfully!");
+    const platform = os.platform();
+    const releases = await YTDlpWrap.default.getGithubReleases(1, 1);
+    const latestRelease = releases[0];
+    
+    let assetName = "yt-dlp";
+    if (platform === "darwin") {
+      assetName = "yt-dlp_macos";
+    } else if (platform === "linux") {
+      assetName = "yt-dlp_linux";
+    } else if (platform === "win32") {
+      assetName = "yt-dlp.exe";
+    }
+
+    const asset = latestRelease.assets.find(a => a.name === assetName);
+    
+    if (asset) {
+      console.log(`🚀 Downloading ${assetName} for ${platform}...`);
+      await downloadFile(asset.browser_download_url, YTDLP_PATH);
+      console.log("✅ yt-dlp downloaded successfully!");
+    } else {
+      console.log("⚠️ Platform-specific asset not found, falling back to default...");
+      await YTDlpWrap.default.downloadFromGithub(YTDLP_PATH);
+      console.log("✅ yt-dlp downloaded successfully!");
+    }
   } catch (error) {
     console.error(`❌ Failed to download yt-dlp: ${error.message}`);
     console.log("\n💡 Manual alternative: Download yt-dlp from https://github.com/yt-dlp/yt-dlp/releases");
@@ -75,21 +128,6 @@ function prompt(rl, question) {
  */
 function sanitizeFilename(filename) {
   return filename.replace(/[<>:"/\\|?*]/g, "_").substring(0, 200);
-}
-
-/**
- * Gets default choices (used with -y flag)
- */
-function getDefaultChoices(playlistTitle = null) {
-  const outputDir = playlistTitle
-    ? path.join(DOWNLOADS_DIR, sanitizeFilename(playlistTitle))
-    : DOWNLOADS_DIR;
-
-  return {
-    mediaType: DEFAULTS.mediaType,
-    quality: DEFAULTS.quality,
-    outputDir,
-  };
 }
 
 /**
@@ -173,7 +211,6 @@ async function downloadMedia(links, outputDir, mediaType, quality) {
       link,
       "-o", path.join(outputDir, "%(title)s.%(ext)s"),
       "--no-playlist-reverse",
-      "--ignore-errors",
       "--no-warnings",
       "--ffmpeg-location", ffmpegPath,
     ];
@@ -182,14 +219,13 @@ async function downloadMedia(links, outputDir, mediaType, quality) {
 
     if (mediaType === "audio") {
       formatArgs = [
-        "-f", "bestaudio/best",
+        "-f", "ba/b",
         "-x",
         "--audio-format", "mp3",
         "--audio-quality", `${quality}K`,
       ];
     } else {
-      const videoFormat =
-        quality !== "best" ? `bv*[height<=${quality}]+ba/b` : "bv*+ba/b";
+      const videoFormat = quality !== "best" ? `bv*[height<=${quality}]+ba/b` : "bv*+ba/b";
       formatArgs = [
         "-f", videoFormat,
         "--merge-output-format", "mp4",
@@ -250,13 +286,15 @@ async function inspectLink(link) {
   const ytDlpWrap = new YTDlpWrap.default(YTDLP_PATH);
 
   try {
-    const stdout = await ytDlpWrap.execPromise([
+    const args = [
       link,
       "--flat-playlist",
       "--print", "%(playlist_title)s",
       "--playlist-items", "1",
       "--no-warnings",
-    ]);
+    ];
+
+    const stdout = await ytDlpWrap.execPromise(args);
 
     const title = stdout.trim();
     if (title && title !== "NA" && title !== link) {
@@ -264,7 +302,6 @@ async function inspectLink(link) {
     }
     return null;
   } catch (error) {
-    // Not a playlist or can't fetch info
     return null;
   }
 }
@@ -275,13 +312,18 @@ async function inspectLink(link) {
 function parseArgs() {
   const args = process.argv.slice(2);
   const result = {
-    useDefaults: false,
+    mediaType: null,
+    quality: null,
     links: [],
   };
 
   for (const arg of args) {
-    if (arg === "-y" || arg === "--yes") {
-      result.useDefaults = true;
+    if (arg === "--video") {
+      result.mediaType = "video";
+      result.quality = "best";
+    } else if (arg === "--audio") {
+      result.mediaType = "audio";
+      result.quality = "320";
     } else if (!arg.startsWith("-")) {
       result.links.push(arg);
     }
@@ -296,10 +338,9 @@ function parseArgs() {
 async function main() {
   console.log("🎬 YouTube Downloader\n");
   
-  // Ensure yt-dlp is available
   await ensureYtDlp();
 
-  const { useDefaults, links: argLinks } = parseArgs();
+  const { mediaType: argMediaType, quality: argQuality, links: argLinks } = parseArgs();
   let links = argLinks;
 
   // If no links from args, try links file
@@ -318,7 +359,6 @@ async function main() {
     process.exit(1);
   }
 
-  // Inspect the first link for playlist title
   console.log("\nInspecting link...");
   const playlistTitle = await inspectLink(links[0]);
   
@@ -326,10 +366,22 @@ async function main() {
     console.log(`📋 Playlist detected: "${playlistTitle}"`);
   }
 
-  // Get choices: default or interactive
-  const { mediaType, quality, outputDir } = useDefaults
-    ? getDefaultChoices(playlistTitle)
-    : await getUserChoices(playlistTitle);
+  let choices;
+  if (argMediaType) {
+    const outputDir = playlistTitle
+      ? path.join(DOWNLOADS_DIR, sanitizeFilename(playlistTitle))
+      : DOWNLOADS_DIR;
+
+    choices = {
+      mediaType: argMediaType,
+      quality: argQuality,
+      outputDir: outputDir,
+    };
+  } else {
+    choices = await getUserChoices(playlistTitle);
+  }
+  
+  const { mediaType, quality, outputDir } = choices;
 
   console.log(`\n🎬 Starting download...`);
   console.log(`   - Link(s): ${links.join(", ")}`);
