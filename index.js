@@ -1,401 +1,237 @@
-import YTDlpWrap from "yt-dlp-wrap";
-import ffmpegPath from "ffmpeg-static";
-import * as fs from "fs";
-import * as path from "path";
-import * as readline from "readline";
-import { fileURLToPath } from "url";
-import * as dotenv from "dotenv";
-import os from "os";
-import https from "https";
+#!/usr/bin/env node
 
-dotenv.config({quiet: true});
+import fs from 'node:fs';
+import readline from 'node:readline/promises';
+import { CONFIG, resolvePath } from './src/config.js';
+import { download } from './src/download.js';
+import { inspect, listFormats, resolveSelection, streamsOf } from './src/probe.js';
+import { printPlaylistSummary, printVideoSummary, printWarnings } from './src/report.js';
+import { createTempDir, ensureBinary, resolveFfmpeg, resolveYtDlpPath } from './src/setup.js';
+import { ICON } from './src/terminal.js';
+import { wasInterrupted } from './src/ytdlp.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// =============================================================================
+// Command line
+// =============================================================================
 
-// === CONFIGURATION ===
-const LINKS_FILE = process.env.LINKS_FILE;
-const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR;
-const YTDLP_PATH = process.env.YTDLP_PATH;
+const USAGE = `${ICON.app} YouTube Downloader
 
-/**
- * Downloads a file from a URL to a destination path
- */
-function downloadFile(url, dest) {
-  return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(dest);
-    https.get(url, (response) => {
-      if (response.statusCode === 302 || response.statusCode === 301) {
-        downloadFile(response.headers.location, dest).then(resolve).catch(reject);
-        return;
-      }
-      if (response.statusCode !== 200) {
-        reject(new Error(`Failed to download: ${response.statusCode}`));
-        return;
-      }
-      response.pipe(file);
-      file.on("finish", () => {
-        file.close();
-        fs.chmodSync(dest, 0o755);
-        resolve();
-      });
-    }).on("error", (err) => {
-      fs.unlink(dest, () => {});
-      reject(err);
-    });
-  });
-}
+Usage: node index.js [options] [URL...]
 
-/**
- * Downloads yt-dlp binary if not present
- */
-async function ensureYtDlp() {
-  if (fs.existsSync(YTDLP_PATH)) {
-    // Check if it's a directory (might happen if something went wrong)
-    if (fs.lstatSync(YTDLP_PATH).isDirectory()) {
-      console.log("⚠️ Found a directory at YTDLP_PATH. Removing it...");
-      fs.rmSync(YTDLP_PATH, { recursive: true, force: true });
+Media
+  --video              Download video, best quality available (default)
+  --audio              Extract audio, keeping the original codec (no re-encode)
+  --mp3                Extract audio and convert it to MP3 V0 (compatibility)
+  --compat             Prefer H.264/AAC in MP4 instead of the best codecs in MKV
+  --subs               Embed French and English subtitles when available
+
+Behaviour
+  -o, --output DIR     Destination directory (default: ${CONFIG.downloadsDir})
+  -y, --yes            Skip the confirmation prompt
+  --fast               Skip the extra probe that hunts for a better player client
+  --formats            List every available format and exit
+  --cookies BROWSER    Use cookies from a browser (chrome, firefox, edge, ...)
+
+Maintenance
+  --update             Update the yt-dlp binary and exit
+  --no-update          Do not check the binary age on startup
+  -v, --verbose        Echo raw yt-dlp output and commands
+  -h, --help           Show this help
+
+URLs may also be listed one per line in ${CONFIG.linksFile} (# starts a comment).`;
+
+const BOOLEAN_FLAGS = {
+  '--video': { mediaType: 'video' },
+  '--audio': { mediaType: 'audio' },
+  '--mp3': { mediaType: 'audio', compat: true },
+  '--compat': { compat: true },
+  '--subs': { subs: true },
+  '-y': { yes: true }, '--yes': { yes: true },
+  '--fast': { fast: true },
+  '--formats': { listFormats: true },
+  '--update': { update: true },
+  '--no-update': { noUpdate: true },
+  '-v': { verbose: true }, '--verbose': { verbose: true },
+  '-h': { help: true }, '--help': { help: true },
+};
+
+const VALUE_FLAGS = { '--cookies': 'cookies', '-o': 'outputDir', '--output': 'outputDir' };
+
+function parseArgs(argv) {
+  const options = {
+    mediaType: null, compat: false, subs: false, cookies: null, outputDir: null, links: [],
+    yes: false, fast: false, listFormats: false, update: false, noUpdate: false,
+    verbose: false, help: false,
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg in BOOLEAN_FLAGS) {
+      Object.assign(options, BOOLEAN_FLAGS[arg]);
+    } else if (arg in VALUE_FLAGS) {
+      index += 1;
+      const value = argv[index];
+      if (!value || value.startsWith('-')) throw new Error(`Missing value for ${arg}`);
+      options[VALUE_FLAGS[arg]] = value;
+    } else if (arg.startsWith('-')) {
+      throw new Error(`Unknown option: ${arg}`);
     } else {
-      console.log("✅ yt-dlp binary found.");
-      return;
+      options.links.push(arg);
     }
   }
 
-  console.log("📥 Downloading yt-dlp binary (first run only)...");
-  
-  // Create bin directory
-  const binDir = path.dirname(YTDLP_PATH);
-  if (!fs.existsSync(binDir)) {
-    fs.mkdirSync(binDir, { recursive: true });
-  }
+  return options;
+}
 
+function collectLinks(fromArgs) {
+  if (fromArgs.length > 0) return fromArgs;
+  if (!fs.existsSync(CONFIG.linksFile)) return [];
+  return fs
+    .readFileSync(CONFIG.linksFile, 'utf-8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
+}
+
+/** Falls back to the default answer when there is no terminal to ask (scripts, cron, CI). */
+async function ask(question, fallback) {
+  if (!process.stdin.isTTY) return fallback;
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const platform = os.platform();
-    const releases = await YTDlpWrap.default.getGithubReleases(1, 1);
-    const latestRelease = releases[0];
-    
-    let assetName = "yt-dlp";
-    if (platform === "darwin") {
-      assetName = "yt-dlp_macos";
-    } else if (platform === "linux") {
-      assetName = "yt-dlp_linux";
-    } else if (platform === "win32") {
-      assetName = "yt-dlp.exe";
-    }
-
-    const asset = latestRelease.assets.find(a => a.name === assetName);
-    
-    if (asset) {
-      console.log(`🚀 Downloading ${assetName} for ${platform}...`);
-      await downloadFile(asset.browser_download_url, YTDLP_PATH);
-      console.log("✅ yt-dlp downloaded successfully!");
-    } else {
-      console.log("⚠️ Platform-specific asset not found, falling back to default...");
-      await YTDlpWrap.default.downloadFromGithub(YTDLP_PATH);
-      console.log("✅ yt-dlp downloaded successfully!");
-    }
-  } catch (error) {
-    console.error(`❌ Failed to download yt-dlp: ${error.message}`);
-    console.log("\n💡 Manual alternative: Download yt-dlp from https://github.com/yt-dlp/yt-dlp/releases");
-    console.log(`   and place it in: ${binDir}`);
-    process.exit(1);
-  }
-}
-
-/**
- * Creates a readline interface for terminal input
- */
-function createReadlineInterface() {
-  return readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-}
-
-/**
- * Prompts the user with a question and returns the answer
- */
-function prompt(rl, question) {
-  return new Promise((resolve) => {
-    rl.question(question, (answer) => {
-      resolve(answer.trim());
-    });
-  });
-}
-
-/**
- * Sanitizes a filename by removing invalid characters
- */
-function sanitizeFilename(filename) {
-  return filename.replace(/[<>:"/\\|?*]/g, "_").substring(0, 200);
-}
-
-/**
- * Gets download choices from the user via terminal input.
- */
-async function getUserChoices(playlistTitle = null) {
-  const rl = createReadlineInterface();
-
-  try {
-    // 1. Choose media type
-    let mediaTypeChoice = "";
-    while (mediaTypeChoice !== "0" && mediaTypeChoice !== "1") {
-      mediaTypeChoice = await prompt(
-        rl,
-        "Enter 1 for video, 0 for audio [default: 0]: "
-      );
-      if (!mediaTypeChoice) {
-        mediaTypeChoice = "0";
-      }
-    }
-    const mediaType = mediaTypeChoice === "0" ? "audio" : "video";
-
-    // 2. Choose quality
-    let quality = "";
-    if (mediaType === "audio") {
-      const audioQualities = ["128", "192", "256", "320"];
-      while (!audioQualities.includes(quality)) {
-        quality = await prompt(
-          rl,
-          `Choose audio quality in kbps (${audioQualities.join(", ")}) [default: 320]: `
-        );
-        if (!quality) {
-          quality = "320";
-        }
-      }
-    } else {
-      const videoQualities = ["720", "1080", "best"];
-      while (!videoQualities.includes(quality)) {
-        quality = await prompt(
-          rl,
-          `Choose video quality in p (${videoQualities.join(", ")}) [default: best]: `
-        );
-        if (!quality) {
-          quality = "best";
-        }
-      }
-    }
-
-    // 3. Choose destination directory
-    const defaultDir = playlistTitle
-      ? path.join(DOWNLOADS_DIR, sanitizeFilename(playlistTitle))
-      : DOWNLOADS_DIR;
-
-    const outputDirStr = await prompt(
-      rl,
-      `Enter output directory [default: ${defaultDir}]: `
-    );
-    const outputDir = outputDirStr || defaultDir;
-
-    return { mediaType, quality, outputDir };
+    return (await rl.question(question)).trim() || fallback;
   } finally {
     rl.close();
   }
 }
 
-/**
- * Downloads media using yt-dlp
- */
-async function downloadMedia(links, outputDir, mediaType, quality) {
-  // Create output directory if it doesn't exist
-  if (!fs.existsSync(outputDir)) {
-    fs.mkdirSync(outputDir, { recursive: true });
-  }
-
-  const ytDlpWrap = new YTDlpWrap.default(YTDLP_PATH);
-
-  for (const link of links) {
-    console.log(`\n📥 Processing: ${link}`);
-
-    const baseArgs = [
-      link,
-      "-o", path.join(outputDir, "%(title)s.%(ext)s"),
-      "--no-playlist-reverse",
-      "--no-warnings",
-      "--ffmpeg-location", ffmpegPath,
-    ];
-
-    let formatArgs = [];
-
-    if (mediaType === "audio") {
-      formatArgs = [
-        "-f", "ba/b",
-        "-x",
-        "--audio-format", "mp3",
-        "--audio-quality", `${quality}K`,
-      ];
-    } else {
-      const videoFormat = quality !== "best" ? `bv*[height<=${quality}]+ba/b` : "bv*+ba/b";
-      formatArgs = [
-        "-f", videoFormat,
-        "--merge-output-format", "mp4",
-      ];
-    }
-
-    const args = [...baseArgs, ...formatArgs];
-
-    try {
-      await new Promise((resolve, reject) => {
-        let currentTitle = "";
-        
-        const ytDlpProcess = ytDlpWrap.exec(args);
-
-        ytDlpProcess.on("progress", (progress) => {
-          const percent = progress.percent ? `${progress.percent.toFixed(1)}%` : "...";
-          const speed = progress.currentSpeed || "...";
-          const eta = progress.eta || "?";
-          process.stdout.write(
-            `\r⬇️  ${percent} @ ${speed} (ETA: ${eta}s)          `
-          );
-        });
-
-        ytDlpProcess.on("ytDlpEvent", (eventType, eventData) => {
-          if (eventType === "download") {
-            // Extract title from destination
-            const destMatch = eventData.match(/Destination: .*[/\\](.+)\.(mp3|mp4|webm|m4a)/);
-            if (destMatch) {
-              currentTitle = destMatch[1];
-              console.log(`\n🎵 ${currentTitle}`);
-            }
-          }
-          if (eventType === "ExtractAudio" || eventType === "Merger") {
-            process.stdout.write(`\r🔄 Converting...                    `);
-          }
-        });
-
-        ytDlpProcess.on("error", (error) => {
-          console.error(`\n❌ Error: ${error.message}`);
-          resolve(); // Continue with next link
-        });
-
-        ytDlpProcess.on("close", () => {
-          console.log(`\n✅ Done!`);
-          resolve();
-        });
-      });
-    } catch (error) {
-      console.error(`\n❌ An error occurred: ${error.message}`);
-    }
-  }
+async function askMissingOptions(options) {
+  const mediaType =
+    options.mediaType ??
+    ((await ask('Media type - [1] video, [0] audio (default 1): ', '1')) === '0' ? 'audio' : 'video');
+  const chosenDir =
+    options.outputDir ?? (await ask(`Destination (default ${CONFIG.downloadsDir}): `, CONFIG.downloadsDir));
+  return { mediaType, outputDir: resolvePath(chosenDir, process.cwd()) };
 }
 
-/**
- * Inspects a link to check if it's a playlist and get its title
- */
-async function inspectLink(link) {
-  const ytDlpWrap = new YTDlpWrap.default(YTDLP_PATH);
+// =============================================================================
+// Orchestration
+// =============================================================================
 
-  try {
-    const args = [
-      link,
-      "--flat-playlist",
-      "--print", "%(playlist_title)s",
-      "--playlist-items", "1",
-      "--no-warnings",
-    ];
+async function handleLink(context, link) {
+  console.log(`\n${ICON.info} Inspecting ${link}`);
+  const inspection = await inspect(context, link);
+  printWarnings(inspection.warnings);
 
-    const stdout = await ytDlpWrap.execPromise(args);
-
-    const title = stdout.trim();
-    if (title && title !== "NA" && title !== link) {
-      return title;
-    }
-    return null;
-  } catch (error) {
-    return null;
-  }
-}
-
-/**
- * Parses command line arguments
- */
-function parseArgs() {
-  const args = process.argv.slice(2);
-  const result = {
-    mediaType: null,
-    quality: null,
-    links: [],
-  };
-
-  for (const arg of args) {
-    if (arg === "--video") {
-      result.mediaType = "video";
-      result.quality = "best";
-    } else if (arg === "--audio") {
-      result.mediaType = "audio";
-      result.quality = "320";
-    } else if (!arg.startsWith("-")) {
-      result.links.push(arg);
-    }
+  if (context.listFormats) {
+    await listFormats(context, inspection.infoPath);
+    return true;
   }
 
-  return result;
-}
+  const selection = await resolveSelection(context, inspection.infoPath);
+  const streams = streamsOf(inspection.media, selection.format_id);
+  const isPlaylist = inspection.kind === 'playlist';
+  const summary = { ...inspection, selection, streams };
 
-/**
- * Main function
- */
-async function main() {
-  console.log("🎬 YouTube Downloader\n");
-  
-  await ensureYtDlp();
-
-  const { mediaType: argMediaType, quality: argQuality, links: argLinks } = parseArgs();
-  let links = argLinks;
-
-  // If no links from args, try links file
-  if (links.length === 0 && fs.existsSync(LINKS_FILE)) {
-    const fileContent = fs.readFileSync(LINKS_FILE, "utf-8");
-    links = fileContent
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line && !line.startsWith("#"));
-  }
-
-  if (links.length === 0) {
-    console.log(
-      `⚠️  No URL provided via arguments and no links found in '${LINKS_FILE}'.`
-    );
-    process.exit(1);
-  }
-
-  console.log("\nInspecting link...");
-  const playlistTitle = await inspectLink(links[0]);
-  
-  if (playlistTitle) {
-    console.log(`📋 Playlist detected: "${playlistTitle}"`);
-  }
-
-  let choices;
-  if (argMediaType) {
-    const outputDir = playlistTitle
-      ? path.join(DOWNLOADS_DIR, sanitizeFilename(playlistTitle))
-      : DOWNLOADS_DIR;
-
-    choices = {
-      mediaType: argMediaType,
-      quality: argQuality,
-      outputDir: outputDir,
-    };
+  if (isPlaylist) {
+    printPlaylistSummary(context, summary);
   } else {
-    choices = await getUserChoices(playlistTitle);
+    printVideoSummary(context, summary);
   }
-  
-  const { mediaType, quality, outputDir } = choices;
 
-  console.log(`\n🎬 Starting download...`);
-  console.log(`   - Link(s): ${links.join(", ")}`);
-  console.log(`   - Type: ${mediaType}`);
-  console.log(`   - Quality: ${quality}`);
-  console.log(`   - Destination: ${path.resolve(outputDir)}`);
-  console.log("-".repeat(40));
+  if (!context.yes && !/^y(es)?$/i.test(await ask('\n   Download? [Y/n] ', 'y'))) {
+    console.log(`   ${ICON.info} Skipped.`);
+    return true;
+  }
 
-  await downloadMedia(links, outputDir, mediaType, quality);
-
-  console.log("\n🎉 All downloads are complete.");
+  return download(context, {
+    link,
+    isPlaylist,
+    infoPath: inspection.infoPath,
+    allClients: inspection.allClients,
+  });
 }
 
-main().catch((error) => {
-  console.error(`Fatal error: ${error.message}`);
-  process.exit(1);
-});
+/**
+ * Everything the run needs is validated here, once, and only when it is needed:
+ * --help touches nothing, --update needs the binary alone.
+ */
+async function createContext(options) {
+  const binary = { ytDlpPath: resolveYtDlpPath(), verbose: options.verbose };
+  await ensureBinary(binary, { skipUpdate: options.noUpdate });
+
+  const ffmpeg = resolveFfmpeg();
+  if (!ffmpeg.hasFfprobe) {
+    console.log(`${ICON.warn} ffprobe not found, so cover art is not embedded. Install ffmpeg system-wide to enable it.`);
+  }
+
+  const choices = options.listFormats
+    ? { mediaType: options.mediaType ?? 'video', outputDir: CONFIG.downloadsDir }
+    : await askMissingOptions(options);
+
+  return Object.freeze({
+    ...options,
+    ...choices,
+    ytDlpPath: binary.ytDlpPath,
+    ffmpegLocation: ffmpeg.location,
+    hasFfprobe: ffmpeg.hasFfprobe,
+    tempDir: createTempDir(),
+  });
+}
+
+async function main(options) {
+  if (options.help) {
+    console.log(USAGE);
+    return;
+  }
+
+  console.log(`${ICON.app} YouTube Downloader`);
+
+  if (options.update) {
+    await ensureBinary({ ytDlpPath: resolveYtDlpPath(), verbose: options.verbose }, { forceUpdate: true });
+    return;
+  }
+
+  const links = collectLinks(options.links);
+  if (links.length === 0) {
+    console.log(`${ICON.warn} No URL given and none found in ${CONFIG.linksFile}.\n`);
+    console.log(USAGE);
+    process.exitCode = 1;
+    return;
+  }
+
+  const context = await createContext(options);
+
+  let failures = 0;
+  for (const link of links) {
+    if (wasInterrupted()) break;
+    try {
+      if (!(await handleLink(context, link))) failures += 1;
+    } catch (error) {
+      console.error(`${ICON.fail} ${link}: ${error.message}`);
+      if (context.verbose) console.error(error.stack);
+      failures += 1;
+    }
+  }
+
+  if (wasInterrupted()) {
+    console.log(`\n${ICON.warn} Interrupted, partial files were kept for resuming.`);
+    process.exitCode = 130;
+  } else if (failures > 0) {
+    console.log(`\n${ICON.fail} ${failures} of ${links.length} link(s) failed.`);
+    process.exitCode = 1;
+  } else if (!context.listFormats) {
+    console.log(`\n${ICON.done} All downloads complete.`);
+  }
+}
+
+const argv = process.argv.slice(2);
+// Read before parsing so an invalid command line can still report its stack.
+const verbose = argv.includes('-v') || argv.includes('--verbose');
+
+try {
+  await main(parseArgs(argv));
+} catch (error) {
+  console.error(`${ICON.fail} ${error.message}`);
+  if (verbose) console.error(error.stack);
+  process.exitCode = 1;
+}
