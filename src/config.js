@@ -28,13 +28,15 @@ export const RELEASE_ASSETS = {
 
 /** Expands a leading "~" and anchors relative paths so the CWD never matters. */
 export function resolvePath(value, base) {
+  if (!value) throw new Error(`Missing required environment variable.`);
   const expanded = value.startsWith('~') ? path.join(os.homedir(), value.slice(1)) : value;
-  return path.resolve(base, expanded);
+  return path.resolve(base ?? ROOT_DIR, expanded);
 }
 
 export const CONFIG = {
-  linksFile: resolvePath(process.env.LINKS_FILE ?? 'links.txt', ROOT_DIR),
-  downloadsDir: resolvePath(process.env.DOWNLOADS_DIR ?? path.join(os.homedir(), 'Downloads'), ROOT_DIR),
+  linksFile: resolvePath(process.env.LINKS_FILE, ROOT_DIR),
+  videoDir: resolvePath(process.env.VIDEO_DIR),
+  audioDir: resolvePath(process.env.AUDIO_DIR),
   binDir: path.join(ROOT_DIR, 'bin'),
   ytDlpOverride: process.env.YTDLP_PATH ? resolvePath(process.env.YTDLP_PATH, ROOT_DIR) : null,
 };

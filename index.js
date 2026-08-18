@@ -26,7 +26,7 @@ Media
   --subs               Embed French and English subtitles when available
 
 Behaviour
-  -o, --output DIR     Destination directory (default: ${CONFIG.downloadsDir})
+  -o, --output DIR     Destination directory (default: ~/Movies for video, ~/Music for audio)
   -y, --yes            Skip the confirmation prompt
   --fast               Skip the extra probe that hunts for a better player client
   --formats            List every available format and exit
@@ -108,8 +108,9 @@ async function askMissingOptions(options) {
   const mediaType =
     options.mediaType ??
     ((await ask('Media type - [1] video, [0] audio (default 1): ', '1')) === '0' ? 'audio' : 'video');
+  const defaultDir = mediaType === 'audio' ? CONFIG.audioDir : CONFIG.videoDir;
   const chosenDir =
-    options.outputDir ?? (await ask(`Destination (default ${CONFIG.downloadsDir}): `, CONFIG.downloadsDir));
+    options.outputDir ?? (options.mediaType ? defaultDir : await ask(`Destination (default ${defaultDir}): `, defaultDir));
   return { mediaType, outputDir: resolvePath(chosenDir, process.cwd()) };
 }
 
@@ -165,7 +166,7 @@ async function createContext(options) {
   }
 
   const choices = options.listFormats
-    ? { mediaType: options.mediaType ?? 'video', outputDir: CONFIG.downloadsDir }
+    ? { mediaType: options.mediaType ?? 'video', outputDir: CONFIG.videoDir }
     : await askMissingOptions(options);
 
   return Object.freeze({

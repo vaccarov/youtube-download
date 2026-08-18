@@ -6,8 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "audio": "node index.js --audio",
-    "video": "node index.js --video",
+    "audio": "node index.js --audio -y",
+    "video": "node index.js --video -y",
     "formats": "node index.js --formats",
     "update": "node index.js --update"
   },

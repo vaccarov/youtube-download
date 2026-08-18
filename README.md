@@ -38,19 +38,19 @@ npm install
 
 ```bash
 # Interactive: asks for media type and destination
-npm start -- "https://www.youtube.com/watch?v=VIDEO_ID"
+npm start "https://www.youtube.com/watch?v=VIDEO_ID"
 
-# Best video quality, no questions asked
-node index.js --video -y "https://www.youtube.com/watch?v=VIDEO_ID"
+# Best video quality, auto-saved to ~/Movies
+npm run video "https://www.youtube.com/watch?v=VIDEO_ID"
 
-# Audio only, original codec preserved
-node index.js --audio -y "https://www.youtube.com/watch?v=VIDEO_ID"
+# Audio only, auto-saved to ~/Music
+npm run audio "https://www.youtube.com/watch?v=VIDEO_ID"
 
 # A whole playlist, into its own subfolder
-node index.js --video "https://www.youtube.com/playlist?list=PLAYLIST_ID"
+npm run video "https://www.youtube.com/playlist?list=PLAYLIST_ID"
 
 # Inspect what is available without downloading
-node index.js --formats "https://www.youtube.com/watch?v=VIDEO_ID"
+npm run formats "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
 URLs can also be listed one per line in `links.txt`; lines starting with `#` are
@@ -65,8 +65,8 @@ ignored. Running the script with no URL argument falls back to that file.
 | `--mp3` | Extract audio and convert it to MP3 V0 |
 | `--compat` | Prefer H.264/AAC in MP4 over the best codecs in MKV |
 | `--subs` | Embed French and English subtitles when available |
-| `-o, --output DIR` | Destination directory |
-| `-y, --yes` | Skip the confirmation prompt |
+| `-o, --output DIR` | Destination directory (default: `~/Movies` for video, `~/Music` for audio) |
+| `-y, --yes` | Skip the confirmation prompt (implicit in `npm run video`/`audio`) |
 | `--fast` | Skip the extra probe that hunts for a better player client |
 | `--formats` | List every available format and exit |
 | `--cookies BROWSER` | Read cookies from `chrome`, `firefox`, `edge`, ... |
@@ -88,7 +88,7 @@ selected, which player client served them, and how large the result will be:
    Audio      251 · Opus · 133 kb/s · stereo · 48.0 kHz · 5.0 MiB
    Client     android_vr
    Output     mkv · 1.1 GiB
-   Folder     /home/you/Downloads
+   Folder     ~/Movies
 ```
 
 For a playlist you get its title, entry count, total duration, a size estimate
@@ -117,14 +117,15 @@ straight out of its container.
 
 ## Configuration
 
-A `.env` file is optional; see `.env.example`. Relative paths are resolved
+A `.env` file is optional. Relative paths are resolved
 against the project directory, not your shell's working directory, and `~`
 expands to your home directory.
 
 | Variable | Default |
 | --- | --- |
 | `LINKS_FILE` | `links.txt` |
-| `DOWNLOADS_DIR` | `~/Downloads` |
+| `VIDEO_DIR` | `~/Movies` |
+| `AUDIO_DIR` | `~/Music` |
 | `YTDLP_PATH` | `./bin/<platform-specific name>` |
 
 ## Project layout
