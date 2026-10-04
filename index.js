@@ -2,12 +2,14 @@
 
 import fs from 'node:fs';
 import readline from 'node:readline/promises';
+import { parseArgs as parseNodeArgs } from 'node:util';
 import { CONFIG, resolvePath } from './src/config.js';
+import { findWorkingCookiesBrowser, isSignInError } from './src/cookies.js';
 import { download } from './src/download.js';
 import { inspect, listFormats, resolveSelection, streamsOf } from './src/probe.js';
 import { printPlaylistSummary, printVideoSummary, printWarnings } from './src/report.js';
 import { createTempDir, ensureBinary, resolveFfmpeg, resolveYtDlpPath } from './src/setup.js';
-import { ICON } from './src/terminal.js';
+import { ICON, truncate } from './src/terminal.js';
 import { wasInterrupted } from './src/ytdlp.js';
 
 // =============================================================================
@@ -40,47 +42,39 @@ Maintenance
 
 URLs may also be listed one per line in ${CONFIG.linksFile} (# starts a comment).`;
 
-const BOOLEAN_FLAGS = {
-  '--video': { mediaType: 'video' },
-  '--audio': { mediaType: 'audio' },
-  '--mp3': { mediaType: 'audio', compat: true },
-  '--compat': { compat: true },
-  '--subs': { subs: true },
-  '-y': { yes: true }, '--yes': { yes: true },
-  '--fast': { fast: true },
-  '--formats': { listFormats: true },
-  '--update': { update: true },
-  '--no-update': { noUpdate: true },
-  '-v': { verbose: true }, '--verbose': { verbose: true },
-  '-h': { help: true }, '--help': { help: true },
+/** Declared once, in the shape node:util expects; URLs are the positionals. */
+const PARSE_OPTIONS = {
+  video: { type: 'boolean' }, audio: { type: 'boolean' }, mp3: { type: 'boolean' },
+  compat: { type: 'boolean' }, subs: { type: 'boolean' }, fast: { type: 'boolean' },
+  formats: { type: 'boolean' }, update: { type: 'boolean' }, 'no-update': { type: 'boolean' },
+  yes: { type: 'boolean', short: 'y' }, verbose: { type: 'boolean', short: 'v' },
+  help: { type: 'boolean', short: 'h' }, cookies: { type: 'string' },
+  output: { type: 'string', short: 'o' },
 };
 
-const VALUE_FLAGS = { '--cookies': 'cookies', '-o': 'outputDir', '--output': 'outputDir' };
-
 function parseArgs(argv) {
-  const options = {
-    mediaType: null, compat: false, subs: false, cookies: null, outputDir: null, links: [],
-    yes: false, fast: false, listFormats: false, update: false, noUpdate: false,
-    verbose: false, help: false,
+  const { values, positionals } = parseNodeArgs({
+    args: argv,
+    options: PARSE_OPTIONS,
+    allowPositionals: true,
+  });
+
+  return {
+    // --mp3 is --audio plus a compatibility conversion.
+    mediaType: values.video ? 'video' : values.audio || values.mp3 ? 'audio' : null,
+    compat: Boolean(values.compat || values.mp3),
+    subs: Boolean(values.subs),
+    cookies: values.cookies ?? null,
+    outputDir: values.output ?? null,
+    links: positionals,
+    yes: Boolean(values.yes),
+    fast: Boolean(values.fast),
+    listFormats: Boolean(values.formats),
+    update: Boolean(values.update),
+    noUpdate: Boolean(values['no-update']),
+    verbose: Boolean(values.verbose),
+    help: Boolean(values.help),
   };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg in BOOLEAN_FLAGS) {
-      Object.assign(options, BOOLEAN_FLAGS[arg]);
-    } else if (arg in VALUE_FLAGS) {
-      index += 1;
-      const value = argv[index];
-      if (!value || value.startsWith('-')) throw new Error(`Missing value for ${arg}`);
-      options[VALUE_FLAGS[arg]] = value;
-    } else if (arg.startsWith('-')) {
-      throw new Error(`Unknown option: ${arg}`);
-    } else {
-      options.links.push(arg);
-    }
-  }
-
-  return options;
 }
 
 function collectLinks(fromArgs) {
@@ -114,13 +108,36 @@ async function askMissingOptions(options) {
   return { mediaType, outputDir: resolvePath(chosenDir, process.cwd()) };
 }
 
+/** A failing run lists every blocked video once, with a title when one is known. */
+function printFailedVideos(failed, titleById = new Map()) {
+  if (failed.length === 0) return;
+  console.log(`${ICON.fail} ${failed.length} video(s) could not be downloaded:`);
+  for (const { id, message } of failed) {
+    const title = id ? titleById.get(id) : null;
+    const label = title ? `${truncate(title, 55)} (${id})` : (id ?? '—');
+    console.log(`   ${label}: ${truncate(message, 120)}`);
+  }
+}
+
 // =============================================================================
 // Orchestration
 // =============================================================================
 
 async function handleLink(context, link) {
   console.log(`\n${ICON.info} Inspecting ${link}`);
-  const inspection = await inspect(context, link);
+
+  let inspection;
+  try {
+    inspection = await inspect(context, link);
+  } catch (error) {
+    if (context.cookies || !isSignInError(error.message) || wasInterrupted()) throw error;
+    console.log(`${ICON.info} This content needs a signed-in session, looking for browser cookies...`);
+    const browser = await findWorkingCookiesBrowser(context, link);
+    if (!browser) throw error;
+    console.log(`${ICON.info} Retrying inspection with ${browser} cookies...`);
+    context = { ...context, cookies: browser };
+    inspection = await inspect(context, link);
+  }
   printWarnings(inspection.warnings);
 
   if (context.listFormats) {
@@ -128,9 +145,11 @@ async function handleLink(context, link) {
     return true;
   }
 
+  const isPlaylist = inspection.kind !== 'video';
+
+  // Anything already in yt-dlp's archive is skipped by the download itself.
   const selection = await resolveSelection(context, inspection.infoPath);
   const streams = streamsOf(inspection.media, selection.format_id);
-  const isPlaylist = inspection.kind === 'playlist';
   const summary = { ...inspection, selection, streams };
 
   if (isPlaylist) {
@@ -144,12 +163,41 @@ async function handleLink(context, link) {
     return true;
   }
 
-  return download(context, {
+  const target = {
     link,
     isPlaylist,
     infoPath: inspection.infoPath,
     allClients: inspection.allClients,
-  });
+  };
+
+  const titleById = new Map((isPlaylist ? inspection.playlist.entries : []).map((entry) => [entry.id, entry.title]));
+  if (!isPlaylist) titleById.set(summary.media.id, summary.selection.title);
+
+  let result = await download(context, target);
+  let retriedWithCookies = false;
+
+  if (!result.ok && !context.cookies && result.signInBlocked && !wasInterrupted()) {
+    const firstId = result.failed.find((error) => error.id)?.id;
+    const probeUrl = firstId ? `https://www.youtube.com/watch?v=${firstId}` : link;
+    console.log(`${ICON.info} Some videos need a signed-in YouTube session, looking for browser cookies...`);
+    const browser = await findWorkingCookiesBrowser(context, probeUrl);
+    if (browser) {
+      console.log(`${ICON.info} Retrying blocked videos with ${browser} cookies...`);
+      context = { ...context, cookies: browser };
+      result = await download(context, target);
+      retriedWithCookies = true;
+    }
+  }
+
+  if (result.ok && retriedWithCookies) {
+    console.log(`${ICON.ok} Blocked videos downloaded with ${context.cookies} cookies.`);
+  } else if (!result.ok) {
+    printFailedVideos(result.failed, titleById);
+    if (result.failed.some((error) => error.id && isSignInError(error.message)) && !context.cookies) {
+      console.log(`${ICON.info} Pass --cookies BROWSER (e.g. --cookies firefox) to download the blocked videos.`);
+    }
+  }
+  return result.ok;
 }
 
 /**

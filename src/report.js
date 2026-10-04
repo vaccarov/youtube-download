@@ -13,7 +13,7 @@ function describeStream(parts) {
   return parts.filter((part) => part && part !== UNKNOWN).join(' · ');
 }
 
-export function describeVideoStream(stream) {
+function describeVideoStream(stream) {
   return describeStream([
     stream.format_id, stream.resolution, stream.fps ? `@${stream.fps}` : null,
     codecLabel(stream.vcodec), stream.dynamic_range,
@@ -21,7 +21,7 @@ export function describeVideoStream(stream) {
   ]);
 }
 
-export function describeAudioStream(stream) {
+function describeAudioStream(stream) {
   // On a combined stream, tbr covers video too, so only a real abr is meaningful.
   const bitrate = stream.abr ?? (stream.vcodec === 'none' ? stream.tbr : null);
   return describeStream([
@@ -65,15 +65,19 @@ export function printVideoSummary(context, { selection, streams, allClients }) {
   field('Folder', context.outputDir);
 }
 
-export function printPlaylistSummary(context, { playlist, selection, streams, allClients }) {
+export function printPlaylistSummary(context, { kind, playlist, selection, streams, allClients }) {
+  const noun = kind === 'channel' ? 'Channel' : 'Playlist';
   const entries = playlist.entries;
   const totalDuration = entries.reduce((sum, entry) => sum + entry.duration, 0);
-  const estimate = selection.filesize && selection.duration
-    ? (selection.filesize / selection.duration) * totalDuration
-    : null;
+  const sizes = entries.filter((entry) => Number.isFinite(entry.size)).map((entry) => entry.size);
+  const estimate = sizes.length === entries.length && sizes.length > 0
+    ? sizes.reduce((a, b) => a + b, 0)
+    : selection.filesize && selection.duration
+      ? (selection.filesize / selection.duration) * totalDuration
+      : null;
   const video = streams.find((stream) => stream.vcodec !== 'none');
 
-  console.log(`\n${ICON.list} Playlist: ${playlist.title}`);
+  console.log(`\n${ICON.list} ${noun}: ${playlist.title}`);
   field('Videos', `${entries.length} · total ${formatDuration(totalDuration)}`);
   field('Quality', `sample #1 → ${video ? describeVideoStream(video) : describeAudioStream(streams[0])}`);
   field('Client', describeClient(streams, allClients));

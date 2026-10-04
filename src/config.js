@@ -15,6 +15,9 @@ export const BINARY_MAX_AGE_DAYS = 7;
 
 export const ARCHIVE_FILENAME = '.yt-dlp-archive.txt';
 
+/** Browsers probed in order when a video needs a signed-in session to unlock. */
+export const DEFAULT_COOKIES_BROWSERS = ['firefox', 'chromium', 'brave', 'safari', 'chrome', 'edge'];
+
 /** Sentinels that make yt-dlp's own output unambiguous to parse. */
 export const SELECTION_TAG = '@SEL@';
 export const PROGRESS_TAG = '@DL@';

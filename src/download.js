@@ -4,6 +4,7 @@ import {
   ALL_CLIENTS, baseArgs, cookieArgs, embedArgs, formatArgs, outputTemplate,
   parsePrinted, printTemplate, toNumber,
 } from './args.js';
+import { isSignInError } from './cookies.js';
 import { ARCHIVE_FILENAME, POSTPROCESS_TAG, PROGRESS_TAG, SELECTION_TAG } from './config.js';
 import { createProgressPrinter, describeSelection, printWarnings } from './report.js';
 import { ICON, truncate } from './terminal.js';
@@ -11,6 +12,25 @@ import { firstError, streamYtDlp, warningsOf } from './ytdlp.js';
 
 /** Bookkeeping steps that always run and say nothing useful about the download. */
 const SILENT_POSTPROCESSORS = new Set(['MoveFiles', 'Concat']);
+
+/** Every per-video failure yt-dlp reported, deduplicated: { id, message }. */
+function errorsOf(stderr) {
+  const seen = new Set();
+  const errors = [];
+  for (const line of stderr.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('ERROR:')) continue;
+    const rest = trimmed.replace(/^ERROR:\s*/, '');
+    const match = rest.match(/^\[([^\]]+)\]\s*([\w-]{11}):\s?(.*)$/);
+    const id = match ? match[2] : null;
+    const message = match ? match[3] : rest;
+    const key = id ? `${id}:${message}` : message;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    errors.push({ id, message });
+  }
+  return errors;
+}
 
 /**
  * A playlist is downloaded from its own URL so yt-dlp walks the entries itself,
@@ -25,6 +45,8 @@ function downloadArgs(context, target) {
     ...baseArgs(context), ...cookieArgs(context), ...sourceArgs(target),
     ...formatArgs(context), ...embedArgs(context),
     '-o', outputTemplate(context, target.isPlaylist),
+    // Every download appends here, so any link already listed is skipped.
+    '--download-archive', path.join(context.outputDir, ARCHIVE_FILENAME),
     '-N', '4',
     '--quiet', '--progress', '--newline',
     '--progress-delta', process.stdout.isTTY ? '0.5' : '5',
@@ -34,7 +56,6 @@ function downloadArgs(context, target) {
     '--no-simulate',
   ];
   if (target.isPlaylist) {
-    args.push('--download-archive', path.join(context.outputDir, ARCHIVE_FILENAME));
     args.push('--print', printTemplate(`before_dl:${SELECTION_TAG}`));
   }
   return args;
@@ -65,14 +86,22 @@ export async function download(context, target) {
     }
   });
 
-  if (code === 0) {
+  const failed = errorsOf(stderr);
+  if (code === 0 && failed.length === 0) {
     printer.note(`${ICON.ok} Done.`);
-  } else {
+  } else if (!target.isPlaylist) {
     const reason = firstError(stderr) ?? `exit code ${code}`;
     printer.note(`${ICON.fail} ${reason}`);
     // A cached info json holds signed stream URLs, which YouTube expires.
     if (reason.includes('403')) printer.note(`${ICON.info} Stream URLs expired, run again to refresh.`);
+  } else {
+    printer.note(`${ICON.fail} ${failed.length} video(s) could not be downloaded.`);
   }
   printWarnings(warningsOf(stderr));
-  return code === 0;
+
+  return {
+    ok: code === 0 && failed.length === 0,
+    failed,
+    signInBlocked: failed.some((error) => error.id && isSignInError(error.message)),
+  };
 }

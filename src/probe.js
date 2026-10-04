@@ -5,6 +5,15 @@ import { SELECTION_TAG } from './config.js';
 import { ICON } from './terminal.js';
 import { captureOrThrow, warningsOf } from './ytdlp.js';
 
+/** Matches @handle, /channel/, /c/ and /user/ URLs, which yt-dlp extracts as channels. */
+function isChannelLink(link) {
+  try {
+    return /^\/(@[\w.-]+|channel|user|c)\//.test(new URL(link).pathname);
+  } catch {
+    return false;
+  }
+}
+
 /** Warnings meaning YouTube withheld formats from the clients we queried. */
 const WITHHELD_FORMAT_WARNINGS = [
   /PO Token/i, /SABR/i, /missing a URL/i, /DRM protected/i,
@@ -81,7 +90,7 @@ export async function inspect(context, link) {
 
   const sample = await extractBestClient(context, entries[0].url);
   return {
-    kind: 'playlist',
+    kind: isChannelLink(link) ? 'channel' : 'playlist',
     media: sample.info,
     playlist: probe.info,
     warnings: [...probe.warnings, ...sample.warnings],

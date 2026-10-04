@@ -52,7 +52,10 @@ export function embedArgs(context) {
   return args;
 }
 
-/** Titles are trimmed inside the template so the id and extension always survive. */
+/**
+ * Titles are trimmed inside the template so the extension always survives, and
+ * the id is kept so yt-dlp's own download archive can recognise the file.
+ */
 export function outputTemplate(context, isPlaylist) {
   const name = '%(title).120s [%(id)s].%(ext)s';
   return isPlaylist

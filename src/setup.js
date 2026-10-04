@@ -2,9 +2,6 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Readable, Transform } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
-import ffmpegStatic from 'ffmpeg-static';
 import { BINARY_MAX_AGE_DAYS, CONFIG, RELEASE_ASSETS, RELEASE_BASE_URL } from './config.js';
 import { ICON } from './terminal.js';
 import { captureOrThrow } from './ytdlp.js';
@@ -51,22 +48,16 @@ async function downloadBinary(ytDlpPath) {
   const response = await fetch(`${RELEASE_BASE_URL}/${assetName}`);
   if (!response.ok) throw new Error(`${assetName}: HTTP ${response.status}`);
 
-  const hash = createHash('sha256');
-  const tempPath = `${ytDlpPath}.download`;
-  const digestStream = new Transform({
-    transform(chunk, _encoding, callback) {
-      hash.update(chunk);
-      callback(null, chunk);
-    },
-  });
-  await pipeline(Readable.fromWeb(response.body), digestStream, fs.createWriteStream(tempPath));
-
-  const digest = hash.digest('hex');
+  // Verification happens before anything is written, so a mismatch cannot leave
+  // a bad binary behind. The temp name only guards against a crash mid-write.
+  const bytes = Buffer.from(await response.arrayBuffer());
+  const digest = createHash('sha256').update(bytes).digest('hex');
   if (digest !== checksum) {
-    fs.rmSync(tempPath);
     throw new Error(`Checksum mismatch for ${assetName}: expected ${checksum}, got ${digest}`);
   }
 
+  const tempPath = `${ytDlpPath}.download`;
+  fs.writeFileSync(tempPath, bytes);
   fs.renameSync(tempPath, ytDlpPath);
   if (os.platform() !== 'win32') fs.chmodSync(ytDlpPath, 0o755);
   console.log(`${ICON.ok} yt-dlp installed, SHA-256 verified.`);
@@ -121,16 +112,16 @@ function findExecutable(name) {
 }
 
 /**
- * Prefers a system install because ffmpeg-static ships ffmpeg without ffprobe,
- * which ffmpeg needs to probe containers when embedding cover art.
+ * A system install is required: yt-dlp needs ffmpeg to merge and extract
+ * streams. ffprobe ships alongside it but is probed separately, because it is
+ * what makes cover art embedding possible.
  */
 export function resolveFfmpeg() {
   const systemFfmpeg = findExecutable('ffmpeg');
-  if (systemFfmpeg) {
-    return { location: path.dirname(systemFfmpeg), hasFfprobe: Boolean(findExecutable('ffprobe')) };
+  if (!systemFfmpeg) {
+    throw new Error('ffmpeg not found. Install it and make sure it is on your PATH.');
   }
-  if (!ffmpegStatic) throw new Error('No ffmpeg found. Install ffmpeg or run "npm install".');
-  return { location: ffmpegStatic, hasFfprobe: false };
+  return { location: path.dirname(systemFfmpeg), hasFfprobe: Boolean(findExecutable('ffprobe')) };
 }
 
 // -----------------------------------------------------------------------------

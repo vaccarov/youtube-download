@@ -9,7 +9,8 @@
     "audio": "node index.js --audio -y",
     "video": "node index.js --video -y",
     "formats": "node index.js --formats",
-    "update": "node index.js --update"
+    "update": "node index.js --update",
+    "test": "node test.mjs"
   },
   "keywords": [
     "youtube",
@@ -19,9 +20,6 @@
   ],
   "author": "",
   "license": "MIT",
-  "dependencies": {
-    "ffmpeg-static": "^5.2.0"
-  },
   "engines": {
     "node": ">=22.0.0"
   }

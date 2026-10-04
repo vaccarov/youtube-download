@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import readline from 'node:readline';
 import { ICON } from './terminal.js';
 
 let activeChild = null;
@@ -20,21 +21,6 @@ process.on('SIGINT', () => {
   process.exit(130);
 });
 
-function lineReader(onLine) {
-  let pending = '';
-  return {
-    push(chunk) {
-      const lines = (pending + chunk).split('\n');
-      pending = lines.pop();
-      for (const line of lines) onLine(line.replace(/\r$/, ''));
-    },
-    flush() {
-      if (pending) onLine(pending);
-      pending = '';
-    },
-  };
-}
-
 /** Only `ytDlpPath` and `verbose` are read here, so setup can call in with a partial context. */
 function spawnYtDlp(context, args) {
   if (context.verbose) {
@@ -48,7 +34,7 @@ function spawnYtDlp(context, args) {
 }
 
 /** Buffers both streams, for the calls whose whole output is the result (-J, --print, -F). */
-function captureYtDlp(context, args) {
+export function captureYtDlp(context, args) {
   return new Promise((resolve, reject) => {
     const child = spawnYtDlp(context, args);
     let stdout = '';
@@ -71,19 +57,16 @@ function captureYtDlp(context, args) {
 export function streamYtDlp(context, args, onLine) {
   return new Promise((resolve, reject) => {
     const child = spawnYtDlp(context, args);
-    const [out, err] = [lineReader(onLine), lineReader(onLine)];
-    let stderr = '';
+    const readers = [child.stdout, child.stderr].map((stream) =>
+      readline.createInterface({ input: stream, crlfDelay: Infinity }));
+    for (const reader of readers) reader.on('line', onLine);
 
-    child.stdout.on('data', (chunk) => out.push(chunk));
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk;
-      err.push(chunk);
-    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => (stderr += chunk));
     child.on('error', reject);
     child.on('close', (code) => {
       activeChild = null;
-      out.flush();
-      err.flush();
+      for (const reader of readers) reader.close();
       resolve({ code, stderr });
     });
   });
